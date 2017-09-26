@@ -1,0 +1,668 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ulogo compiler/downloader
+
+;---------------
+; high level comms
+;
+
+to download
+compile-procs parse filetostring file-field
+end
+
+to compile-procs :list
+setstatus "|Compiling...|
+let [procs compile-fcns :list]
+setstatus se count :procs "bytes
+;print :procs
+;stop
+if not check [print "|Device not found.| stop]
+wl :proc-start :procs
+setup-vector "startup 0
+setup-vector "on-tick 8
+setup-vector "on-blerx 16
+setup-vector "on-button 24
+;setup-vector "powerup $3f4
+setstatus se count :procs "bytes.
+end
+
+to command-center-cr :line
+if empty? :line [stop]
+if (first :line) = "!
+   [carefully bf :line [print errormessage] stop]
+let [code compile-line :line]
+;print :code
+;stop
+;stopvm
+if not check [print "|Device not found.| stop]
+wl $20 se :code 0
+go
+end
+
+to setup-vector :name :addr
+ifelse empty? get :name "addr
+  [wl :addr [0 0 0 0 0 0 0 0]]
+  [wl :addr se compile-line (se :name) 0]
+end
+
+
+;----------------
+; compiler
+;
+
+to compile-fcns :code
+dolist [i :plist-names] [erplist :i]
+setup
+output pass3 pass2 pass1 :code
+end
+
+to compile-line :code
+let [*result* [] arglist [] locals []
+      *pc* 0 name "*toplevel*
+       toplevel? false]
+pass2-body :code
+output pass3 :*result*
+end
+
+;----------------
+; compiler pass1
+;
+
+to pass1 :list
+let [*result* [] token " name "*toplevel*]
+loop [if empty? :list [output :*result*]
+          make "token pop "list
+          if :token = "to  [pass1-fcn pop "list pass1-args pass1-body]
+          if :token = "define  [pass1-fcn pop "list pop "list pop "list]
+          if :token = "global [setup-globals pop "list]
+          if :token = "constants [setup-constants pop "list]]
+end
+
+to pass1-fcn :proc :args :body
+if not empty? getp :proc "type
+     [error se :proc [already defined]]
+add-name :proc
+add (list :proc :args :body)
+put :proc "args count :args
+put :proc "type "ufun
+ifelse mmmember? "output :body
+    [put :proc "outputs? true]
+    [put :proc "outputs? false]
+end
+
+to pass1-args
+let [*result* []]
+loop [if empty? first :list [output :*result*]
+          if not equal? ": first first :list [output :*result*]
+          add bf pop "list]
+end
+
+to pass1-body
+let [*result* []]
+loop [if empty? :list [output :*result*]
+          if equal? "end first :list [ignore pop "list output :*result*]
+          add pop "list]
+end
+
+to setup-globals :list
+if word? :list [make "list (se bf :list)]
+dolist [i :list][setup-global :i]
+end
+
+to setup-global :name
+let [setname .word "set :name]
+add-name :name add-name :setname
+put :name "type "global
+put :name "index :next-global
+put :name "args 0
+put :name "special? false
+put :name "outputs? true
+put :setname "type "setglobal
+put :setname "index :next-global
+put :setname "args 1
+put :setname "special? false
+put :setname "outputs? false
+make "next-global :next-global + 1
+make "globals se :globals :name
+end
+
+to setup-constants :list
+dolist [i :list]
+  [if or not list? :i not (count :i) = 2
+     [error se [bad constants] :list]
+   add-name first :i
+   put first :i "macro const-eval item 2 :i]
+end
+
+to const-eval :list
+let [result []]
+dolist [i (se :list)][make "result lput const-eval-one :i :result]
+output run :result
+end
+
+to const-eval-one :thing
+if number? :thing [output :thing]
+;if (first :thing) = "# [output from-binary bf :thing]
+if member? :thing [+ - * %] [output :thing]
+let [val getp :thing "macro]
+if not number? :val [error se [bad constant] :thing]
+output :val
+end
+
+
+to mmmember? :a :b
+if word? :b [output equal? :a :b]
+dolist [i :b][if mmmember? :a :i [output true]]
+output false
+end
+
+
+;----------------
+; compiler pass2
+;
+
+
+to pass2 :list
+let [*result* [] *pc* :proc-start]
+loop [if empty? :list [output :*result*]
+         pass2-fcn pop "list]
+end
+
+to pass2-fcn :fcn
+let [name item 1 :fcn
+        arglist item 2 :fcn
+        locals []
+        body item 3 :fcn
+        toplevel? true]
+put :name "addr :*pc*
+put :name "locals 0
+add-and-count se "to :name 2
+pass2-body :body
+add-and-count [prim stop] 1
+end
+
+to pass2-body :body
+let [command? true]
+loop [if empty? :body [stop]
+         pass2-item pop "body]
+end
+
+to pass2-item :item
+selectq typeof :item
+    [list [command-check :item pass2-list :item stop]
+      number [command-check :item  pass2-number :item stop]
+      quote-symbol [command-check :item pass2-string bf :item stop]
+      string [command-check :item pass2-string :item stop]
+      dot-symbol[command-check :item pass2-dsym bf :item stop]]
+pass2-symbol :item
+end
+
+to pass2-number :n
+ifelse and :n < 256 :n > -1
+   [add-and-count se "byte :n 2]
+   [add-and-count se "number :n 5]
+end
+
+to pass2-symbol :item
+if (first :item) = "# [pass2-number from-binary bf :item stop]
+let [nargs getp :item "args]
+if empty? :nargs [try-macro :item stop]
+if  :nargs < 0 [error se [not enough inputs to] :item]
+ifelse :command?
+     [if getp :item "outputs? [error se [you don't say what to do with] :item]]
+     [if not getp :item "outputs? [error se :item [doesn't output]]]
+pass2-argloop
+pass2-funcall :item
+end
+
+to pass2-string :str
+make "str replace :str "\\n char 10
+add-and-count se "string :str (count :str) + 4
+end
+
+to try-macro :item
+let [macro getp :item "macro]
+if empty? :macro [error se :item "undefined]
+make "body se :macro :body
+pass2-item pop "body
+end
+
+to pass2-argloop
+let [toplevel? false command? false]
+repeat :nargs [if empty? :body [error se [not enough inputs to] :item]
+                         pass2-item pop "body infix-check]
+end
+
+to pass2-list :item
+if not empty? :item
+  [if (first :item) = "## [make "item se "# break-into-bytes bf :item]
+   if (first :item) = "#
+    [add-and-count list "# bf :item (count :item) + 2
+     stop]]
+let [command? true]
+add-and-count [|-[-| 0] 3
+pass2-body :item
+add-and-count [|-]-| 0] 1
+end
+
+to break-into-bytes :list
+let [res []]
+dolist [i :list][make "res (se :res byte0 :i byte1 :i)]
+output :res
+end
+
+to pass2-dsym :item
+let [offset dsym-offset :item]
+if empty? :offset [error se :item [has no value]]
+add-and-count se "lthing  :offset 2
+end
+
+to pass2-funcall :item
+let [type getp :item "type]
+if :type =  "ufun [add-and-count se "ufun :item 3 stop]
+if :type =  "global [add-and-count se "gthing :item 2 stop]
+if :type =  "setglobal [add-and-count se "gmake :item 2 stop]
+if getp :item "special? [run (se word "handle- :item) stop]
+add-and-count se "prim :item 1]
+end
+
+to command-check :item
+if :command? [error se [you don't say what to do  with] :item]
+end
+
+to infix-check
+if not infix? [stop]
+let [fcn pop "body]
+pass2-item pop "body
+add-and-count se "prim :fcn 1
+infix-check
+end
+
+to infix?
+if empty? :body [output false]
+output member? first :body :infixes
+end
+
+to dsym-offset :var
+if member? :var :arglist [output (count :arglist) - itempos :var :arglist]
+if member? :var :locals [output logand $ff minus itempos :var :locals]
+output "
+end
+
+to |handle-(|
+let [nargs 1] pass2-argloop
+if not (pop "body) = "|)| [error "|() error|]
+end
+
+to |handle-)|
+error [misplaced )]
+end
+
+to handle-waituntil
+handle-list-that-outputs
+add-and-count [prim waituntil] 1
+end
+
+to handle-list-that-outputs
+add-and-count [|-[-| 0] 3
+let [nargs 1
+     newbody (se pop "body)
+     body :newbody]
+pass2-argloop
+add-and-count [|-]-r| 0] 1
+end
+
+to handle-let
+if :name = "*toplevel* [error [let can only be used in a procedure]]
+let [newbody pop "body
+     body :newbody]
+if not list? :body [error [let needs a list as input]]
+loop [if empty? :body [stop]
+         make "locals se :locals first :body
+         put :name "locals 1 + getp :name "locals
+         handle-make]
+end
+
+to handle-make
+let [var sym pop "body
+       offset dsym-offset :var]
+if empty? :offset [error se :var [isn't a local]]
+let [nargs 1] pass2-argloop
+add-and-count se "lmake :offset 2
+end
+
+to sym :name
+if member? first :name [" :][output bf :name]
+output :name
+end
+
+;----------------
+; compiler pass3
+;
+
+to pass3 :list
+let [lists []
+      *result* []]
+repeat 99999
+      [if empty? :list [output :*result*]
+       pass3-item pop "list]
+end
+
+to pass3-item :item
+let [x item 3 :item]
+selectq item 2 :item
+    [to           [add getp :x "args add getp :x "locals]
+      byte        [add 1 add byte0 :x]
+      number      [add 2 add byte0 :x add byte1 :x add byte2 :x add byte3 :x]
+      |-[-|       [add 3
+                   make "lists  fput count :*result* :lists
+                   add 0 add 0]
+     string     [add 3 add byte0 1 + count :x
+                add byte1 1 + count :x
+                  dotimes [i count :x][add ascii item :i + 1 :x]
+                  add 0]
+      #         [add 3 add byte0 count :x add byte1 count :x
+                 dolist [i :x][add :i]]
+      |-]-|      [add-eol 4]
+;      |-]-r|      [add-eol 5]
+       lthing    [add 5 add :x]
+       lmake    [add 6 add :x]
+       gthing   [add 7 add getp :x "index]
+       gmake   [add 8 add getp :x "index]
+       ufun      [add 9
+                  add byte0 (getp :x "addr)
+                  add byte1 (getp :x "addr)]
+       prim       [add prim# :x]]
+end
+
+to add-eol :n
+add :n
+let [offset pop "lists
+     len (count :*result*) - :offset - 2]
+setnth :offset :*result* byte0 :len
+setnth :offset + 1 :*result* byte1 :len
+end
+
+to prim# :x
+output  9 + itempos :x :prims
+end
+
+
+;----------------
+; compiler setup
+;
+
+
+to setup-prims :list
+if empty? :list [stop]
+let [name first :list args item 3 :list]
+make "prims se :prims :name
+if :args < 0 [make "infixes se :name :infixes]
+put :name "type "prim
+put :name "args :args
+put :name "special? false
+put :name "outputs? equal? "r item 2 :list
+setup-prims bf bf bf :list
+end
+
+to setup-specials :list
+dolist [name :list]
+    [put :name "type "prim
+      put :name "args 0
+      put :name "special? true]
+end
+
+
+;----------------
+; utilities
+;
+
+to pop :plist
+let [first first thing :plist]
+make :plist bf thing :plist
+output :first
+end
+
+to add-and-count :item :len
+add se :*pc* :item
+make "*pc* sum :*pc* :len
+end
+
+to add :item
+make "*result* lput :item :*result*
+end
+
+to add-name :item
+make "plist-names lput :item :plist-names
+end
+
+to error :thing
+setstatus [No download.]
+if not :name = "*toplevel* [make "thing (se :thing "in :name)]
+print :thing
+stopme
+end
+
+to from-binary  :n
+if empty? :n [output 0]
+output (remainder :n 2) + 2 * from-binary bl :n
+end
+
+to typeof :item
+if list? :item [output "list]
+if number? :item [output "number]
+if (first :item) = ": [output "dot-symbol]
+if (first :item) = "" [output "quote-symbol]
+if (classof :item) = classof first [|abc|] [output "string]
+output "symbol
+end
+
+;---------------
+; monitor
+;
+to ticktask
+let [c 0 res "]
+loop
+ [make "c .recc
+  if :c = -1 [stop]
+  if :c = $af [stop]
+  if :c = 13 [stop]
+  ifelse :c = 10
+    [print :monstr make "monstr "]
+    [make "monstr word :monstr char :c]]
+end
+
+
+
+;---------------
+;
+; comms
+;
+
+to stopvm
+send 0 wait 2
+end
+
+to check
+clearcom
+send $ff
+if recc = $31 [output true]
+open-serial-port
+wait 5
+clearcom
+send $ff
+output recc = $31
+end
+
+to go
+send $fc
+end
+
+to dump :addr :len
+let [res []]
+if :len = 0 [make "len 1]
+repeat int (:len + 15) / 16
+ [make "res se hw :addr "-
+  repeat 16 [make "res se :res hb rb :addr make "addr :addr + 1]
+  print :res]
+end
+
+
+to rb :a
+sendl (se $fe byte0 :a byte1 :a)
+output recc
+end
+
+to rl :a :n
+let [res []]
+dotimes [i :n][make "res se :res rb :a + :i]
+output :res
+end
+
+to wb :a :d
+sendl (se $fd byte0 :a send byte1 :a 1 :d)
+end
+
+to wl :a :l
+sendl (se $fd byte0 :a byte1 :a byte0 count :l byte1 count :l :l)
+end
+
+
+define savememory[][send $fb ignore recc]
+define restorememory[][send $fa ignore recc]
+
+
+;---------------
+;
+; low level comms
+;
+
+to send :n
+.send :n
+end
+
+to recc
+output trecc 100
+end
+
+to trecc :n
+let [c 0 starttime timer]
+loop
+ [make "c .recc
+  if :c > -1 [output :c]
+  if (timer - :starttime) > :n [output -1]]
+end
+
+to open-serial-port
+let [os getproperty "os.name]
+if windows? [open-windows-port stop]
+if member? "Linux :os [open-linux-port stop]
+open-mac-port
+end
+
+to open-windows-port
+let [name portname $2341 $0043]
+if empty? :name [make "name portname $0403 $6015]
+if empty? :name [stop]
+openport :name
+setportparams 9600 8 1 0
+end
+
+to open-mac-port
+let [port find-mac-port]
+if empty? :port [stop]
+openport :port
+ignore exec (word "|stty -f | :port "| 9600|)
+end
+
+to find-mac-port
+dolist [i files "/dev][if member? "cu.usbmodem :i [output :i]]
+dolist [i files "/dev][if member? "cu.usbserial :i [output :i]]
+output "
+end
+
+to open-linux-port
+let [port find-linux-port]
+if empty? :port [stop]
+openport :port
+ignore exec (word "|stty -F | :port "| raw -echo 9600|)
+end
+
+to find-linux-port
+dolist [i files "/dev][if member? "ttyACM0 :i [output :i]]
+output "
+end
+
+
+;---------------
+;
+; etc
+;
+
+to browse
+let[fileinfo askl "dialog [get-common-dialog [get-common-readfile "text]]]
+if empty? :fileinfo [stop]
+setfile-field nth 1 :fileinfo
+end
+
+to print-hexl :list
+let [result []]
+dolist [i :list][make "result lput hw :i :result]
+print :result
+end
+
+to mwait :n
+let [end timer + :n]
+loop [if timer > :end [stop]]
+end
+
+define byte0 [n][output logand :n $ff]
+define byte1 [n][output logand lsh :n -8 $ff]
+define byte2 [n][output logand lsh :n -16 $ff]
+define byte3 [n][output logand lsh :n -24 $ff]
+define hb [n][output hexw logand $ff :n 2]
+define hw [n][output hexw logand $ffff :n 8]
+define ignore [n][]
+define .word [a b][output intern word :a :b]
+
+
+to startup
+setup
+make "monstr "
+;ignore compile-fcns parse filetostring "sys.txt
+usbinit
+open-serial-port
+end
+
+to setup
+if name? "prims [dolist [i :prims][erplist :i]]
+if name? "globals [dolist [i :globals][erplist :i erplist .word "set :i]]
+make "plist-names []
+make "prims [] make "globals [] make "infixes []
+make "next-global 0
+make "proc-start $60
+;make "command-center $1000
+setup-prims 
+ [stop c 0  
+  repeat c 2  if c 2  ifelse c 3
+  + r -1  - r -1  * r -1  / r -1  % r -2
+  = r -1  != r -1  > r -1  < r -1
+  and r -1  or r -1  xor r -1  
+  not r 1  lsl r 2
+  readb r 1  writeb c 2
+  read r 1  write c 2
+  wait c 1  resett c 0  timer r 0
+  startticker c 1  stopticker c 0
+  print c 1  prh c 1  prhb c 1  prs c 1  prf c 2
+  bleinit r 1  bletx c 0  bleconnected r 0
+  readimu c 0  accx r 0  accy r 0  accz r 0
+  ledon c 0  ledoff c 0  
+  led0on c 0  led0off c 0
+  led1on c 0  led1off c 0
+  led2on c 0  led2off c 0
+  led3on c 0  led3off c 0
+  button r 0]
+setup-specials [( ) waituntil make let]
+put "|(| "outputs? true put "|)| "outputs? false
+put "make "outputs? false put "let "outputs? false
+setup-globals [n m]
+end

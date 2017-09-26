@@ -1,0 +1,85 @@
+constants [[blerxbuf $1360][bletxbuf $1380][membuf $1160]]
+
+to startup
+setn 0
+repeat 3 [ledon wait 30 ledoff wait 30]
+end
+
+to on-blerx
+let [cmd readb blerxbuf + 1]
+if :cmd = 1 [prs "starting resett]
+if :cmd = 2 [write-seg]
+if :cmd = 3 [prf "|%d milliseconds\n|  timer]
+if :cmd = 4 [led0on]
+if :cmd = 5 [led0off]
+blesend :cmd
+end
+
+to on-button
+led0on led1on led2on led3on
+wait 2000
+led0off led1off led2off led3off
+end
+
+to write-seg
+let [addr 0
+     seg membuf + ((readb blerxbuf + 2) * 16)]
+repeat 16 
+ [writeb :seg + :addr readb blerxbuf + :addr + 3
+  make "addr :addr + 1]
+end
+
+to bletest
+writeb bletxbuf 4
+write bletxbuf + 1 $04030201
+bletx
+end
+
+to blesend :x
+writeb bletxbuf 2
+writeb bletxbuf + 1 $55
+writeb bletxbuf + 2 :x
+bletx
+end
+
+to on-tick
+ledon
+readimu
+writeb bletxbuf 4
+writeb bletxbuf + 1 lsl accx -8
+writeb bletxbuf + 2 lsl accy -8
+writeb bletxbuf + 3 lsl accz -8
+writeb bletxbuf + 4 n
+bletx
+ledoff
+setn n + 1
+;prf "|x: %d | lsl accx -8
+;prf "|y: %d | lsl accy -8
+;prf "|z: %d\n| lsl accz -8
+end
+
+to flash
+repeat 3 [ledon wait 30 ledoff wait 30]
+end
+
+to clearmem
+let [n membuf]
+repeat 512 [writeb :n 0 make "n :n + 1]
+end
+
+to dumpmem
+dump membuf 512
+end
+
+to dump :x :l
+if :l = 0 [make "l 1]
+repeat (:l + 15) / 16 [dumpline :x make "x :x + 16]
+end
+
+
+to dumpline :x
+prf "|%w - | :x
+repeat 16 [prf "|%b | readb :x make "x :x + 1]
+prs " wait 3
+end
+
